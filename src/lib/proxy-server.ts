@@ -65,46 +65,61 @@ export class ProxyServer {
   }
 
   private setupHandlers(): void {
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: [
-        {
-          name: 'get_workflow',
-          description: 'Get a workflow definition by name',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              name: { type: 'string', description: 'Workflow name' },
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+      // Try to fetch tools from upstream if connected
+      if (this.connectionManager.getState() === 'connected') {
+        try {
+          const tools = await this.connectionManager.execute(async () => {
+            return await this.qwickbrainClient.listTools();
+          });
+          return { tools };
+        } catch (error) {
+          console.error('Failed to list tools from upstream:', error);
+        }
+      }
+
+      // Fallback to minimal tool set when offline or error
+      return {
+        tools: [
+          {
+            name: 'get_workflow',
+            description: 'Get a workflow definition by name (cached)',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: 'Workflow name' },
+              },
+              required: ['name'],
             },
-            required: ['name'],
           },
-        },
-        {
-          name: 'get_document',
-          description: 'Get a document by name and type',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              name: { type: 'string', description: 'Document name' },
-              doc_type: { type: 'string', description: 'Document type (rule, frd, design, etc.)' },
-              project: { type: 'string', description: 'Project name (optional)' },
+          {
+            name: 'get_document',
+            description: 'Get a document by name and type (cached)',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: 'Document name' },
+                doc_type: { type: 'string', description: 'Document type (rule, frd, design, etc.)' },
+                project: { type: 'string', description: 'Project name (optional)' },
+              },
+              required: ['name', 'doc_type'],
             },
-            required: ['name', 'doc_type'],
           },
-        },
-        {
-          name: 'get_memory',
-          description: 'Get a memory/context document by name',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              name: { type: 'string', description: 'Memory name' },
-              project: { type: 'string', description: 'Project name (optional)' },
+          {
+            name: 'get_memory',
+            description: 'Get a memory/context document by name (cached)',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: 'Memory name' },
+                project: { type: 'string', description: 'Project name (optional)' },
+              },
+              required: ['name'],
             },
-            required: ['name'],
           },
-        },
-      ],
-    }));
+        ],
+      };
+    });
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
@@ -112,6 +127,7 @@ export class ProxyServer {
       try {
         let result: MCPResponse;
 
+        // Handle cacheable document tools specially
         switch (name) {
           case 'get_workflow':
             result = await this.handleGetWorkflow(args?.name as string);
@@ -130,7 +146,9 @@ export class ProxyServer {
             );
             break;
           default:
-            throw new Error(`Unknown tool: ${name}`);
+            // Generic forwarding for all other tools (analyze_repository, search_codebase, etc.)
+            result = await this.handleGenericTool(name, args || {});
+            break;
         }
 
         return {
@@ -290,6 +308,57 @@ export class ProxyServer {
       },
       _metadata: this.createMetadata('cache'),
     };
+  }
+
+  private async handleGenericTool(name: string, args: Record<string, unknown>): Promise<MCPResponse> {
+    // Generic tool forwarding - no caching for non-document tools
+    if (this.connectionManager.getState() !== 'connected') {
+      return {
+        error: {
+          code: 'UNAVAILABLE',
+          message: `QwickBrain unavailable - cannot call tool: ${name}`,
+          suggestions: [
+            'Check internet connection',
+            'Wait for automatic reconnection',
+          ],
+        },
+        _metadata: this.createMetadata('cache'),
+      };
+    }
+
+    try {
+      const result = await this.connectionManager.execute(async () => {
+        return await this.qwickbrainClient.callTool(name, args);
+      });
+
+      // Parse the MCP response format
+      if (result && typeof result === 'object' && 'content' in result) {
+        const content = (result as any).content;
+        if (Array.isArray(content) && content[0]?.type === 'text') {
+          // Parse the text content as JSON
+          const data = JSON.parse(content[0].text);
+          return {
+            data,
+            _metadata: this.createMetadata('live'),
+          };
+        }
+      }
+
+      // Fallback: return raw result
+      return {
+        data: result,
+        _metadata: this.createMetadata('live'),
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      return {
+        error: {
+          code: 'TOOL_ERROR',
+          message: `Tool call failed: ${errorMessage}`,
+        },
+        _metadata: this.createMetadata('cache'),
+      };
+    }
   }
 
   async start(): Promise<void> {

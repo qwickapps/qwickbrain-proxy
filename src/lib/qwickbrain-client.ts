@@ -250,6 +250,62 @@ export class QwickBrainClient {
     }
   }
 
+  async listTools(): Promise<Array<{ name: string; description?: string; inputSchema?: unknown }>> {
+    if (this.mode === 'mcp' || this.mode === 'sse') {
+      if (!this.client) {
+        throw new Error('MCP client not connected');
+      }
+      const result = await this.client.listTools();
+      return result.tools;
+    } else {
+      // For HTTP mode, fetch tools from API
+      if (!this.config.url) {
+        throw new Error('HTTP mode requires url to be configured');
+      }
+      const response = await fetch(`${this.config.url}/mcp/tools`, {
+        headers: {
+          ...(this.config.apiKey && { 'Authorization': `Bearer ${this.config.apiKey}` }),
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      const json = await response.json() as { tools: Array<{ name: string; description?: string; inputSchema?: unknown }> };
+      return json.tools;
+    }
+  }
+
+  async callTool(name: string, args?: Record<string, unknown>): Promise<unknown> {
+    if (this.mode === 'mcp' || this.mode === 'sse') {
+      if (!this.client) {
+        throw new Error('MCP client not connected');
+      }
+      const result = await this.client.callTool({
+        name,
+        arguments: args || {},
+      });
+      // Return the raw result - let the caller parse it
+      return result;
+    } else {
+      // For HTTP mode, call tool via API
+      if (!this.config.url) {
+        throw new Error('HTTP mode requires url to be configured');
+      }
+      const response = await fetch(`${this.config.url}/mcp/tool`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.config.apiKey && { 'Authorization': `Bearer ${this.config.apiKey}` }),
+        },
+        body: JSON.stringify({ name, arguments: args || {} }),
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      return response.json();
+    }
+  }
+
   async disconnect(): Promise<void> {
     if ((this.mode === 'mcp' || this.mode === 'sse') && this.client && this.transport) {
       await this.client.close();

@@ -81,7 +81,7 @@ program
     // Simple init - create default config
     const config = ConfigSchema.parse({
       qwickbrain: {
-        url: 'http://macmini-devserver.local:3000',
+        url: 'http://macmini-devserver:3000/sse',
       },
     });
 

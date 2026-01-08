@@ -9,6 +9,48 @@ Local MCP proxy for QwickBrain with caching and resilience features.
 - **Graceful degradation**: Serves stale cached data when QwickBrain is unavailable
 - **Write queue**: Queues write operations when offline, syncs when reconnected
 - **Health monitoring**: Continuous health checks and connection state management
+- **Dynamic tool forwarding**: Transparently forwards all QwickBrain tools to MCP clients
+
+## Available Tools
+
+The proxy provides access to all QwickBrain tools:
+
+**Code Analysis:**
+- `analyze_repository` - Analyze repository structure and dependencies
+- `analyze_file` - Extract functions, classes, and structure from files
+- `find_functions` - Find functions matching a pattern
+- `find_classes` - Find classes matching a pattern
+- `get_imports` - Get imports from files
+- `explain_function` - Get detailed function explanations
+
+**Semantic Search:**
+- `search_codebase` - Search code with natural language queries
+- `search_documents` - Search engineering documents
+- `search_memories` - Search project memories
+
+**Document Management:**
+- `create_document` - Create ADRs, FRDs, designs, spikes, reviews
+- `get_document` - Retrieve specific documents (cached)
+- `list_documents` - List documents by type/project
+- `update_document` - Update existing documents
+- `delete_document` - Remove documents
+
+**Repository Management:**
+- `add_repository` - Index GitHub repositories
+- `list_repositories` - List indexed repositories
+- `remove_repository` - Remove from index
+- `update_repository` - Pull and re-index changes
+
+**Workflows & Memories:**
+- `get_workflow` - Get workflow definitions (cached)
+- `list_workflows` - List available workflows
+- `create_workflow` - Define new workflows
+- `update_workflow` - Modify workflows
+- `get_memory` - Retrieve memories (cached)
+- `set_memory` - Store project context
+- `list_memories` - List available memories
+
+Document tools (workflows, documents, memories) are cached locally for offline access. Other tools require active connection to QwickBrain server.
 
 ## Installation
 
@@ -25,7 +67,7 @@ qwickbrain-proxy init
 ```
 
 This creates a default configuration at `~/.qwickbrain/config.json` with:
-- QwickBrain URL: `http://macmini-devserver.local:3000`
+- QwickBrain URL: `http://macmini-devserver:3000/sse`
 - Connection mode: `sse` (Server-Sent Events)
 - Cache directory: `~/.qwickbrain/cache`
 
@@ -41,7 +83,7 @@ Configure mode:
 ```bash
 # SSE mode (default)
 qwickbrain-proxy config set qwickbrain.mode sse
-qwickbrain-proxy config set qwickbrain.url http://macmini-devserver.local:3000
+qwickbrain-proxy config set qwickbrain.url http://macmini-devserver:3000/sse
 
 # MCP stdio mode
 qwickbrain-proxy config set qwickbrain.mode mcp
