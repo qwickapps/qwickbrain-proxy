@@ -1,0 +1,2 @@
+CREATE UNIQUE INDEX `documents_doc_type_name_project_unique` ON `documents` (`doc_type`,`name`,`project`);--> statement-breakpoint
+CREATE UNIQUE INDEX `memories_name_project_unique` ON `memories` (`name`,`project`);

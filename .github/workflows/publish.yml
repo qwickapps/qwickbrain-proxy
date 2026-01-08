@@ -1,0 +1,92 @@
+# NPM Publish Workflow for Public Repos
+# Copy this file to .github/workflows/publish.yml in each public repo
+#
+# Required secrets:
+#   NPM_TOKEN - npm automation token with publish permissions
+
+name: Publish to npm
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'package.json'
+      - 'src/**'
+
+  # Allow manual publish
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Build
+        run: npm run build
+
+      - name: Run validation
+        run: |
+          if grep -q '"validate"' package.json; then
+            echo "Running validation..."
+            npm run validate
+          else
+            echo "No validation script found, skipping"
+          fi
+
+      - name: Check if version changed
+        id: version
+        run: |
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          LOCAL_VERSION=$(node -p "require('./package.json').version")
+
+          # Get published version (returns empty if not published)
+          PUBLISHED_VERSION=$(npm view "$PACKAGE_NAME" version 2>/dev/null || echo "")
+
+          echo "Package: $PACKAGE_NAME"
+          echo "Local version: $LOCAL_VERSION"
+          echo "Published version: $PUBLISHED_VERSION"
+
+          if [ "$LOCAL_VERSION" != "$PUBLISHED_VERSION" ]; then
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+            echo "version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+            echo "Version $LOCAL_VERSION already published"
+          fi
+
+      - name: Publish to npm
+        if: steps.version.outputs.should_publish == 'true'
+        run: npm publish --access public --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.should_publish == 'true'
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          release_name: v${{ steps.version.outputs.version }}
+          body: |
+            Published to npm: https://www.npmjs.com/package/${{ github.repository }}
+
+            Install:
+            ```bash
+            npm install @qwickapps/${{ github.event.repository.name }}@${{ steps.version.outputs.version }}
+            ```
+          draft: false
+          prerelease: false
