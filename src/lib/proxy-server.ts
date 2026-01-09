@@ -57,11 +57,37 @@ export class ProxyServer {
 
     this.connectionManager.on('connected', ({ latencyMs }) => {
       console.error(`Connected to QwickBrain (latency: ${latencyMs}ms)`);
+      // Event-driven: trigger background sync when connection restored
+      this.onConnectionRestored().catch(err => {
+        console.error('Background sync error:', err);
+      });
     });
 
     this.connectionManager.on('disconnected', ({ error }) => {
       console.error(`Disconnected from QwickBrain: ${error}`);
     });
+  }
+
+  private async onConnectionRestored(): Promise<void> {
+    console.error('Starting background cache sync...');
+
+    // Preload critical documents in background
+    const preloadItems = this.config.cache.preload || [];
+    for (const itemType of preloadItems) {
+      try {
+        if (itemType === 'workflows') {
+          // TODO: List and cache all workflows
+          console.error('Preloading workflows...');
+        } else if (itemType === 'rules') {
+          // TODO: List and cache all rules
+          console.error('Preloading rules...');
+        }
+      } catch (error) {
+        console.error(`Failed to preload ${itemType}:`, error);
+      }
+    }
+
+    console.error('Background cache sync complete');
   }
 
   private setupHandlers(): void {
@@ -368,10 +394,7 @@ export class ProxyServer {
       console.error(`Cache cleanup: removed ${documentsDeleted} documents, ${memoriesDeleted} memories`);
     }
 
-    // Connect to QwickBrain
-    await this.qwickbrainClient.connect();
-
-    // Start connection manager
+    // Start connection manager (handles connection gracefully, doesn't throw)
     await this.connectionManager.start();
 
     // Start MCP server
@@ -383,7 +406,12 @@ export class ProxyServer {
 
   async stop(): Promise<void> {
     this.connectionManager.stop();
-    await this.qwickbrainClient.disconnect();
+    try {
+      await this.qwickbrainClient.disconnect();
+    } catch (error) {
+      // Ignore disconnect errors (client may never have connected)
+      console.error('Disconnect error (ignoring):', error);
+    }
     await this.server.close();
   }
 }

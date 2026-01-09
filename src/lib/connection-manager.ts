@@ -34,7 +34,10 @@ export class ConnectionManager extends EventEmitter {
 
   async start(): Promise<void> {
     this.isStopped = false;
-    await this.healthCheck();
+    // Start health check in background (don't block server startup)
+    this.healthCheck().catch(err => {
+      console.error('Initial health check error:', err);
+    });
     this.scheduleHealthCheck();
   }
 

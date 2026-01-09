@@ -232,10 +232,11 @@ export class QwickBrainClient {
       if (this.mode === 'mcp' || this.mode === 'sse') {
         // For MCP/SSE mode, check if client is connected
         if (!this.client) {
-          await this.connect();
+          // Don't create new connection in health check - just return false
+          return false;
         }
         // Try listing tools as health check
-        await this.client!.listTools();
+        await this.client.listTools();
         return true;
       } else {
         // For HTTP mode, ping health endpoint
@@ -246,6 +247,9 @@ export class QwickBrainClient {
         return response.ok;
       }
     } catch (error) {
+      // Connection dropped - clear client to force reconnection
+      this.client = null;
+      this.transport = null;
       return false;
     }
   }

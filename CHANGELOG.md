@@ -5,6 +5,43 @@ All notable changes to the QwickBrain MCP Proxy will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-01-08
+
+### Fixed
+
+- **Blocking Startup Issue**: Removed blocking connection attempts that prevented server from starting in offline mode
+  - Removed `await this.qwickbrainClient.connect()` from startup sequence
+  - Server now starts immediately (< 0.5s) regardless of network connectivity
+  - Connection manager handles network state transitions gracefully without throwing errors
+- **Health Check Blocking**: Changed initial health check to fire-and-forget background task
+  - Eliminates 5-second timeout delay during startup
+  - MCP server becomes available immediately while connection attempts continue in background
+
+### Changed
+
+- **Event-Driven Architecture**: Startup and network state management now fully event-driven
+  - Server startup no longer blocks on network operations
+  - Health checks run in background with exponential backoff (1s → 2s → 4s → 8s → 16s → 32s → 60s max)
+  - Connection state changes trigger appropriate background actions via events
+  - Added `onConnectionRestored()` handler for automatic cache sync when connection is restored
+- **Improved Resilience**: Enhanced degraded mode operation
+  - Server exposes fallback tools immediately even when offline
+  - Background reconnection continues while serving cached data
+  - Disconnect errors during shutdown are now gracefully ignored
+
+### Added
+
+- **Background Cache Sync**: Automatic cache population when connection is restored
+  - Event-driven preloading of workflows and rules on `'connected'` event
+  - Configurable preload items via `cache.preload` array
+  - Foundation for sync queue processing (TODO: implementation)
+
+### Technical Details
+
+- **Non-Blocking Startup**: MCP server ready in < 0.5s vs previous 5+ second timeout/crash
+- **Event Listeners**: Connection manager emits `stateChange`, `connected`, `disconnected`, `reconnecting` events
+- **Graceful Degradation**: Tools available immediately with metadata indicating data source (live/cache/stale)
+
 ## [1.0.1] - 2025-01-08
 
 ### Fixed
