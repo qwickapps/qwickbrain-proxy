@@ -7,6 +7,9 @@ import {
 import { ConnectionManager } from './connection-manager.js';
 import { CacheManager } from './cache-manager.js';
 import { QwickBrainClient } from './qwickbrain-client.js';
+import { WriteQueueManager } from './write-queue-manager.js';
+import { SSEInvalidationListener } from './sse-invalidation-listener.js';
+import { QWICKBRAIN_TOOLS, requiresConnection } from './tools.js';
 import type { Config } from '../types/config.js';
 import type { DB } from '../db/client.js';
 import type { MCPResponse, MCPResponseMetadata } from '../types/mcp.js';
@@ -17,6 +20,8 @@ export class ProxyServer {
   private connectionManager: ConnectionManager;
   private cacheManager: CacheManager;
   private qwickbrainClient: QwickBrainClient;
+  private writeQueueManager: WriteQueueManager;
+  private sseInvalidationListener: SSEInvalidationListener | null = null;
   private config: Config;
 
   constructor(db: DB, config: Config) {
@@ -41,6 +46,16 @@ export class ProxyServer {
     );
 
     this.cacheManager = new CacheManager(db, config.cache);
+    this.writeQueueManager = new WriteQueueManager(db, this.qwickbrainClient);
+
+    // Initialize SSE invalidation listener if in SSE mode
+    if (config.qwickbrain.mode === 'sse' && config.qwickbrain.url) {
+      this.sseInvalidationListener = new SSEInvalidationListener(
+        config.qwickbrain.url,
+        this.cacheManager,
+        config.qwickbrain.apiKey
+      );
+    }
 
     this.setupHandlers();
     this.setupConnectionListeners();
@@ -60,6 +75,10 @@ export class ProxyServer {
       // Event-driven: trigger background sync when connection restored
       this.onConnectionRestored().catch(err => {
         console.error('Background sync error:', err);
+      });
+      // Sync pending write operations
+      this.syncWriteQueue().catch(err => {
+        console.error('Write queue sync error:', err);
       });
     });
 
@@ -90,61 +109,21 @@ export class ProxyServer {
     console.error('Background cache sync complete');
   }
 
-  private setupHandlers(): void {
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-      // Try to fetch tools from upstream if connected
-      if (this.connectionManager.getState() === 'connected') {
-        try {
-          const tools = await this.connectionManager.execute(async () => {
-            return await this.qwickbrainClient.listTools();
-          });
-          return { tools };
-        } catch (error) {
-          console.error('Failed to list tools from upstream:', error);
-        }
-      }
+  private async syncWriteQueue(): Promise<void> {
+    const pendingCount = await this.writeQueueManager.getPendingCount();
+    if (pendingCount === 0) {
+      return;
+    }
 
-      // Fallback to minimal tool set when offline or error
-      return {
-        tools: [
-          {
-            name: 'get_workflow',
-            description: 'Get a workflow definition by name (cached)',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                name: { type: 'string', description: 'Workflow name' },
-              },
-              required: ['name'],
-            },
-          },
-          {
-            name: 'get_document',
-            description: 'Get a document by name and type (cached)',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                name: { type: 'string', description: 'Document name' },
-                doc_type: { type: 'string', description: 'Document type (rule, frd, design, etc.)' },
-                project: { type: 'string', description: 'Project name (optional)' },
-              },
-              required: ['name', 'doc_type'],
-            },
-          },
-          {
-            name: 'get_memory',
-            description: 'Get a memory/context document by name (cached)',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                name: { type: 'string', description: 'Memory name' },
-                project: { type: 'string', description: 'Project name (optional)' },
-              },
-              required: ['name'],
-            },
-          },
-        ],
-      };
+    console.error(`Syncing ${pendingCount} pending write operations...`);
+    const { synced, failed } = await this.writeQueueManager.syncPendingOperations();
+    console.error(`Write queue sync complete: ${synced} synced, ${failed} failed`);
+  }
+
+  private setupHandlers(): void {
+    // Static tool listing - always returns all tools regardless of connection state
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+      return { tools: QWICKBRAIN_TOOLS };
     });
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -171,8 +150,54 @@ export class ProxyServer {
               args?.project as string | undefined
             );
             break;
+          case 'create_document':
+          case 'update_document':
+            result = await this.handleCreateDocument(
+              args?.doc_type as string,
+              args?.name as string,
+              args?.content as string,
+              args?.project as string | undefined,
+              args?.metadata as Record<string, unknown> | undefined
+            );
+            break;
+          case 'set_memory':
+          case 'update_memory':
+            result = await this.handleSetMemory(
+              args?.name as string,
+              args?.content as string,
+              args?.project as string | undefined,
+              args?.metadata as Record<string, unknown> | undefined
+            );
+            break;
           default:
             // Generic forwarding for all other tools (analyze_repository, search_codebase, etc.)
+            // Check if tool requires connection
+            if (requiresConnection(name) && this.connectionManager.getState() !== 'connected') {
+              // Return offline error for non-cacheable tools
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      error: {
+                        code: 'OFFLINE',
+                        message: `QwickBrain offline - "${name}" requires active connection`,
+                        suggestions: [
+                          'Check internet connection',
+                          'Wait for automatic reconnection',
+                          'Cached tools (get_workflow, get_document, get_memory) work offline',
+                        ],
+                      },
+                      _metadata: {
+                        source: 'cache',
+                        status: this.connectionManager.getState(),
+                      },
+                    }, null, 2),
+                  },
+                ],
+                isError: true,
+              };
+            }
             result = await this.handleGenericTool(name, args || {});
             break;
         }
@@ -226,17 +251,17 @@ export class ProxyServer {
     name: string,
     project?: string
   ): Promise<MCPResponse> {
-    // Try cache first
+    // Try cache first (LRU cache never expires, always valid if present)
     const cached = await this.cacheManager.getDocument(docType, name, project);
 
-    if (cached && !cached.isExpired) {
+    if (cached) {
       return {
         data: cached.data,
         _metadata: this.createMetadata('cache', cached.age),
       };
     }
 
-    // Try remote if connected
+    // Not cached - try remote if connected
     if (this.connectionManager.getState() === 'connected') {
       try {
         const result = await this.connectionManager.execute(async () => {
@@ -258,22 +283,11 @@ export class ProxyServer {
         };
       } catch (error) {
         console.error('Failed to fetch from QwickBrain:', error);
-        // Fall through to stale cache
+        // Fall through to error
       }
     }
 
-    // Try stale cache
-    if (cached) {
-      return {
-        data: cached.data,
-        _metadata: {
-          ...this.createMetadata('stale_cache', cached.age),
-          warning: `QwickBrain unavailable - serving cached data (${cached.age}s old)`,
-        },
-      };
-    }
-
-    // No cache, no connection
+    // No cache and remote failed/unavailable
     return {
       error: {
         code: 'UNAVAILABLE',
@@ -289,16 +303,17 @@ export class ProxyServer {
   }
 
   private async handleGetMemory(name: string, project?: string): Promise<MCPResponse> {
-    // Similar logic to handleGetDocument but for memories
+    // Try cache first (LRU cache never expires, always valid if present)
     const cached = await this.cacheManager.getMemory(name, project);
 
-    if (cached && !cached.isExpired) {
+    if (cached) {
       return {
         data: cached.data,
         _metadata: this.createMetadata('cache', cached.age),
       };
     }
 
+    // Not cached - try remote if connected
     if (this.connectionManager.getState() === 'connected') {
       try {
         const result = await this.connectionManager.execute(async () => {
@@ -313,19 +328,11 @@ export class ProxyServer {
         };
       } catch (error) {
         console.error('Failed to fetch memory from QwickBrain:', error);
+        // Fall through to error
       }
     }
 
-    if (cached) {
-      return {
-        data: cached.data,
-        _metadata: {
-          ...this.createMetadata('stale_cache', cached.age),
-          warning: `QwickBrain unavailable - serving cached memory (${cached.age}s old)`,
-        },
-      };
-    }
-
+    // No cache and remote failed/unavailable
     return {
       error: {
         code: 'UNAVAILABLE',
@@ -333,6 +340,94 @@ export class ProxyServer {
         suggestions: ['Check connection', 'Wait for reconnection'],
       },
       _metadata: this.createMetadata('cache'),
+    };
+  }
+
+  private async handleCreateDocument(
+    docType: string,
+    name: string,
+    content: string,
+    project?: string,
+    metadata?: Record<string, unknown>
+  ): Promise<MCPResponse> {
+    // Always update local cache first
+    await this.cacheManager.setDocument(docType, name, content, project, metadata);
+
+    // If connected, sync immediately
+    if (this.connectionManager.getState() === 'connected') {
+      try {
+        await this.connectionManager.execute(async () => {
+          await this.qwickbrainClient.createDocument(docType, name, content, project, metadata);
+        });
+
+        return {
+          data: { success: true },
+          _metadata: this.createMetadata('live'),
+        };
+      } catch (error) {
+        console.error('Failed to create document on QwickBrain:', error);
+        // Fall through to queue
+      }
+    }
+
+    // If offline or sync failed, queue for later
+    await this.writeQueueManager.queueOperation('create_document', {
+      docType,
+      name,
+      content,
+      project,
+      metadata,
+    });
+
+    return {
+      data: { success: true, queued: true },
+      _metadata: {
+        ...this.createMetadata('cache'),
+        warning: 'Operation queued - will sync when connection restored',
+      },
+    };
+  }
+
+  private async handleSetMemory(
+    name: string,
+    content: string,
+    project?: string,
+    metadata?: Record<string, unknown>
+  ): Promise<MCPResponse> {
+    // Always update local cache first
+    await this.cacheManager.setMemory(name, content, project, metadata);
+
+    // If connected, sync immediately
+    if (this.connectionManager.getState() === 'connected') {
+      try {
+        await this.connectionManager.execute(async () => {
+          await this.qwickbrainClient.setMemory(name, content, project, metadata);
+        });
+
+        return {
+          data: { success: true },
+          _metadata: this.createMetadata('live'),
+        };
+      } catch (error) {
+        console.error('Failed to set memory on QwickBrain:', error);
+        // Fall through to queue
+      }
+    }
+
+    // If offline or sync failed, queue for later
+    await this.writeQueueManager.queueOperation('set_memory', {
+      name,
+      content,
+      project,
+      metadata,
+    });
+
+    return {
+      data: { success: true, queued: true },
+      _metadata: {
+        ...this.createMetadata('cache'),
+        warning: 'Operation queued - will sync when connection restored',
+      },
     };
   }
 
@@ -388,14 +483,17 @@ export class ProxyServer {
   }
 
   async start(): Promise<void> {
-    // Clean up expired cache entries on startup
-    const { documentsDeleted, memoriesDeleted } = await this.cacheManager.cleanupExpiredEntries();
-    if (documentsDeleted > 0 || memoriesDeleted > 0) {
-      console.error(`Cache cleanup: removed ${documentsDeleted} documents, ${memoriesDeleted} memories`);
-    }
+    // LRU cache handles eviction automatically when storage limit reached
+    // No need for startup cleanup with LRU-based cache
 
     // Start connection manager (handles connection gracefully, doesn't throw)
     await this.connectionManager.start();
+
+    // Start SSE invalidation listener if configured
+    if (this.sseInvalidationListener) {
+      await this.sseInvalidationListener.start();
+      console.error('SSE cache invalidation listener started');
+    }
 
     // Start MCP server
     const transport = new StdioServerTransport();
@@ -406,6 +504,12 @@ export class ProxyServer {
 
   async stop(): Promise<void> {
     this.connectionManager.stop();
+
+    // Stop SSE invalidation listener
+    if (this.sseInvalidationListener) {
+      this.sseInvalidationListener.stop();
+    }
+
     try {
       await this.qwickbrainClient.disconnect();
     } catch (error) {

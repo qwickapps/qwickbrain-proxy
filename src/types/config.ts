@@ -12,12 +12,7 @@ export const ConfigSchema = z.object({
   }).default({}),
   cache: z.object({
     dir: z.string().optional(),
-    ttl: z.object({
-      workflows: z.number().default(86400), // 24 hours
-      rules: z.number().default(86400), // 24 hours
-      documents: z.number().default(21600), // 6 hours
-      memories: z.number().default(3600), // 1 hour
-    }).default({}),
+    maxCacheSizeBytes: z.number().default(100 * 1024 * 1024), // 100MB default for dynamic tier
     preload: z.array(z.string()).default(['workflows', 'rules']),
   }).default({}),
   connection: z.object({

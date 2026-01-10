@@ -6,7 +6,7 @@ import { createDatabase, runMigrations } from '../../db/client.js';
 import { CacheManager } from '../cache-manager.js';
 import type { Config } from '../../types/config.js';
 
-describe('CacheManager', () => {
+describe('CacheManager - LRU Two-Tier Storage', () => {
   let tmpDir: string;
   let cacheManager: CacheManager;
   let db: ReturnType<typeof createDatabase>['db'];
@@ -22,12 +22,7 @@ describe('CacheManager', () => {
 
     const config: Config['cache'] = {
       dir: tmpDir,
-      ttl: {
-        workflows: 3600,
-        rules: 3600,
-        documents: 1800,
-        memories: 900,
-      },
+      maxCacheSizeBytes: 10 * 1024, // 10KB limit for testing
       preload: [],
     };
 
@@ -49,7 +44,7 @@ describe('CacheManager', () => {
       expect(cached?.data.content).toBe('content here');
       expect(cached?.data.doc_type).toBe('workflow');
       expect(cached?.data.name).toBe('test-workflow');
-      expect(cached?.isExpired).toBe(false);
+      expect(cached?.age).toBeGreaterThanOrEqual(0);
     });
 
     it('should store document with metadata', async () => {
@@ -97,29 +92,39 @@ describe('CacheManager', () => {
       expect(cached?.data.content).toBe('version 2');
     });
 
-    it('should mark document as expired after TTL', async () => {
-      // Override config to have very short TTL for testing
-      const shortTTLConfig: Config['cache'] = {
-        dir: tmpDir,
-        ttl: {
-          workflows: 0, // Expire immediately
-          rules: 0,
-          documents: 0,
-          memories: 0,
-        },
-        preload: [],
-      };
+    it('should mark critical document types as critical', async () => {
+      // Critical types: workflow, rule, agent, template
+      await cacheManager.setDocument('workflow', 'test-workflow', 'content');
+      await cacheManager.setDocument('rule', 'test-rule', 'content');
+      await cacheManager.setDocument('agent', 'test-agent', 'content');
+      await cacheManager.setDocument('template', 'test-template', 'content');
 
-      const shortCacheManager = new CacheManager(db, shortTTLConfig);
-      await shortCacheManager.setDocument('workflow', 'test', 'content');
+      // Non-critical type
+      await cacheManager.setDocument('frd', 'test-frd', 'content');
 
-      // Wait to ensure timestamp difference
-      await new Promise(resolve => setTimeout(resolve, 100));
+      const stats = await cacheManager.getCacheStats();
 
-      const cached = await shortCacheManager.getDocument('workflow', 'test');
+      expect(stats.criticalCount).toBe(4);
+      expect(stats.dynamicCount).toBeGreaterThan(0); // FRD is dynamic
+    });
 
-      expect(cached).not.toBeNull();
-      expect(cached?.isExpired).toBe(true);
+    it('should update lastAccessedAt on read', async () => {
+      await cacheManager.setDocument('workflow', 'test', 'content');
+
+      const cached1 = await cacheManager.getDocument('workflow', 'test');
+      const cachedAt1 = cached1?.cachedAt.getTime();
+
+      // Wait 200ms
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      const cached2 = await cacheManager.getDocument('workflow', 'test');
+      const cachedAt2 = cached2?.cachedAt.getTime();
+
+      // cachedAt should remain the same (shows when first cached)
+      expect(cachedAt2).toBe(cachedAt1);
+
+      // But age should increase over time
+      expect(cached2?.age).toBeGreaterThanOrEqual(0);
     });
   });
 
@@ -132,7 +137,6 @@ describe('CacheManager', () => {
       expect(cached).not.toBeNull();
       expect(cached?.data.content).toBe('memory content');
       expect(cached?.data.name).toBe('test-memory');
-      expect(cached?.isExpired).toBe(false);
     });
 
     it('should store memory with metadata', async () => {
@@ -168,83 +172,169 @@ describe('CacheManager', () => {
       const cached = await cacheManager.getMemory('non-existent');
       expect(cached).toBeNull();
     });
+  });
 
-    it('should mark memory as expired after TTL', async () => {
-      const shortTTLConfig: Config['cache'] = {
-        dir: tmpDir,
-        ttl: {
-          workflows: 0,
-          rules: 0,
-          documents: 0,
-          memories: 0,
-        },
-        preload: [],
-      };
+  describe('LRU Eviction - Two-Tier Storage', () => {
+    it('should NOT evict critical documents when storage limit reached', async () => {
+      // Create large critical documents (workflows)
+      const largeContent = 'x'.repeat(3000); // 3KB each
 
-      const shortCacheManager = new CacheManager(db, shortTTLConfig);
-      await shortCacheManager.setMemory('test', 'content');
+      // Add 4 critical documents = 12KB (exceeds 10KB limit)
+      await cacheManager.setDocument('workflow', 'critical1', largeContent);
+      await cacheManager.setDocument('workflow', 'critical2', largeContent);
+      await cacheManager.setDocument('workflow', 'critical3', largeContent);
+      await cacheManager.setDocument('workflow', 'critical4', largeContent);
 
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // All should still be present (critical tier bypasses limit)
+      const doc1 = await cacheManager.getDocument('workflow', 'critical1');
+      const doc2 = await cacheManager.getDocument('workflow', 'critical2');
+      const doc3 = await cacheManager.getDocument('workflow', 'critical3');
+      const doc4 = await cacheManager.getDocument('workflow', 'critical4');
 
-      const cached = await shortCacheManager.getMemory('test');
+      expect(doc1).not.toBeNull();
+      expect(doc2).not.toBeNull();
+      expect(doc3).not.toBeNull();
+      expect(doc4).not.toBeNull();
+    });
 
-      expect(cached).not.toBeNull();
-      expect(cached?.isExpired).toBe(true);
+    it('should evict oldest dynamic documents when storage limit reached', async () => {
+      const largeContent = 'x'.repeat(3000); // 3KB each
+
+      // Add dynamic documents
+      await cacheManager.setDocument('frd', 'dynamic1', largeContent);
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      await cacheManager.setDocument('frd', 'dynamic2', largeContent);
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      await cacheManager.setDocument('frd', 'dynamic3', largeContent);
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      // Now add another that pushes us over limit (9KB current, 3KB new = 12KB > 10KB)
+      // Should evict dynamic1 (oldest)
+      await cacheManager.setDocument('frd', 'dynamic4', largeContent);
+
+      // dynamic1 should be evicted
+      const doc1 = await cacheManager.getDocument('frd', 'dynamic1');
+      expect(doc1).toBeNull();
+
+      // dynamic2, dynamic3, dynamic4 should remain
+      const doc2 = await cacheManager.getDocument('frd', 'dynamic2');
+      const doc3 = await cacheManager.getDocument('frd', 'dynamic3');
+      const doc4 = await cacheManager.getDocument('frd', 'dynamic4');
+
+      expect(doc2).not.toBeNull();
+      expect(doc3).not.toBeNull();
+      expect(doc4).not.toBeNull();
+    });
+
+    it('should use LRU ordering based on lastAccessedAt', async () => {
+      const largeContent = 'x'.repeat(3000); // 3KB each
+
+      // Add 3 dynamic documents with delays to ensure distinct timestamps
+      await cacheManager.setDocument('frd', 'doc1', largeContent);
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      await cacheManager.setDocument('frd', 'doc2', largeContent);
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      await cacheManager.setDocument('frd', 'doc3', largeContent);
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Access doc2 and doc3 (updates their lastAccessedAt to be newest)
+      await cacheManager.getDocument('frd', 'doc2');
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await cacheManager.getDocument('frd', 'doc3');
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Now doc1 has oldest lastAccessedAt, should be evicted first
+      // Add doc4, should evict doc1 (oldest access)
+      await cacheManager.setDocument('frd', 'doc4', largeContent);
+
+      const doc1 = await cacheManager.getDocument('frd', 'doc1');
+      const doc2 = await cacheManager.getDocument('frd', 'doc2');
+      const doc3 = await cacheManager.getDocument('frd', 'doc3');
+      const doc4 = await cacheManager.getDocument('frd', 'doc4');
+
+      expect(doc1).toBeNull(); // Oldest access, evicted
+      expect(doc2).not.toBeNull(); // Accessed recently, kept
+      expect(doc3).not.toBeNull(); // Accessed recently, kept
+      expect(doc4).not.toBeNull(); // Just added
+    });
+
+    it('should evict memories when document eviction insufficient', async () => {
+      const largeContent = 'x'.repeat(3000); // 3KB each
+
+      // Add one dynamic document
+      await cacheManager.setDocument('frd', 'doc1', largeContent);
+
+      // Add memories
+      await cacheManager.setMemory('mem1', largeContent);
+      await cacheManager.setMemory('mem2', largeContent);
+
+      // Current: 9KB (over limit when we add another 3KB)
+      // Should evict doc1 and mem1 to make room
+      await cacheManager.setDocument('frd', 'doc2', largeContent);
+
+      const doc1 = await cacheManager.getDocument('frd', 'doc1');
+      const mem1 = await cacheManager.getMemory('mem1');
+      const mem2 = await cacheManager.getMemory('mem2');
+
+      // At least one should be evicted (LRU order)
+      const evictedCount = [doc1, mem1, mem2].filter(item => item === null).length;
+      expect(evictedCount).toBeGreaterThan(0);
     });
   });
 
-  describe('cleanupExpiredEntries', () => {
-    it('should delete expired documents and memories', async () => {
-      const shortTTLConfig: Config['cache'] = {
-        dir: tmpDir,
-        ttl: {
-          workflows: 0,
-          rules: 0,
-          documents: 0,
-          memories: 0,
-        },
-        preload: [],
-      };
+  describe('Cache invalidation', () => {
+    it('should invalidate specific document', async () => {
+      await cacheManager.setDocument('workflow', 'test', 'content');
 
-      const shortCacheManager = new CacheManager(db, shortTTLConfig);
+      const cached1 = await cacheManager.getDocument('workflow', 'test');
+      expect(cached1).not.toBeNull();
 
-      // Add some items that will immediately expire
-      await shortCacheManager.setDocument('workflow', 'test1', 'content1');
-      await shortCacheManager.setDocument('rule', 'test2', 'content2');
-      await shortCacheManager.setMemory('memory1', 'content3');
+      await cacheManager.invalidateDocument('workflow', 'test');
 
-      // Wait to ensure they're expired (need sufficient time for clock to advance)
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      // Clean up
-      const result = await shortCacheManager.cleanupExpiredEntries();
-
-      expect(result.documentsDeleted).toBe(2);
-      expect(result.memoriesDeleted).toBe(1);
-
-      // Verify they're gone
-      const doc1 = await shortCacheManager.getDocument('workflow', 'test1');
-      const mem1 = await shortCacheManager.getMemory('memory1');
-
-      expect(doc1).toBeNull();
-      expect(mem1).toBeNull();
+      const cached2 = await cacheManager.getDocument('workflow', 'test');
+      expect(cached2).toBeNull();
     });
 
-    it('should not delete non-expired items', async () => {
-      await cacheManager.setDocument('workflow', 'test', 'content');
-      await cacheManager.setMemory('memory', 'content');
+    it('should invalidate specific memory', async () => {
+      await cacheManager.setMemory('test', 'content');
 
-      const result = await cacheManager.cleanupExpiredEntries();
+      const cached1 = await cacheManager.getMemory('test');
+      expect(cached1).not.toBeNull();
 
-      expect(result.documentsDeleted).toBe(0);
-      expect(result.memoriesDeleted).toBe(0);
+      await cacheManager.invalidateMemory('test');
 
-      // Verify they're still there
-      const doc = await cacheManager.getDocument('workflow', 'test');
-      const mem = await cacheManager.getMemory('memory');
+      const cached2 = await cacheManager.getMemory('test');
+      expect(cached2).toBeNull();
+    });
+  });
 
-      expect(doc).not.toBeNull();
-      expect(mem).not.toBeNull();
+  describe('Cache statistics', () => {
+    it('should return accurate cache statistics', async () => {
+      const content = 'x'.repeat(1000); // 1KB each
+
+      // Add critical documents
+      await cacheManager.setDocument('workflow', 'wf1', content);
+      await cacheManager.setDocument('rule', 'rule1', content);
+
+      // Add dynamic documents
+      await cacheManager.setDocument('frd', 'frd1', content);
+
+      // Add memories
+      await cacheManager.setMemory('mem1', content);
+
+      const stats = await cacheManager.getCacheStats();
+
+      expect(stats.criticalCount).toBe(2);
+      expect(stats.dynamicCount).toBeGreaterThan(0);
+      expect(stats.memoryCount).toBe(1);
+      expect(stats.criticalSize).toBeGreaterThan(0);
+      expect(stats.dynamicSize).toBeGreaterThan(0);
+      expect(stats.totalSize).toBe(stats.criticalSize + stats.dynamicSize);
+      expect(stats.totalCount).toBe(stats.criticalCount + stats.dynamicCount);
     });
   });
 

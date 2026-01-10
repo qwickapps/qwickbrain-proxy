@@ -53,12 +53,7 @@ describe('ProxyServer', () => {
       },
       cache: {
         dir: tmpDir,
-        ttl: {
-          workflows: 3600,
-          rules: 3600,
-          documents: 1800,
-          memories: 900,
-        },
+        maxCacheSizeBytes: 100 * 1024 * 1024, // 100MB
         preload: [],
       },
       connection: {
@@ -102,63 +97,33 @@ describe('ProxyServer', () => {
     });
   });
 
-  describe('cache cleanup on startup', () => {
-    it('should clean up expired cache entries on start', async () => {
-      // Add some expired entries
-      const shortTTLConfig = { ...config };
-      shortTTLConfig.cache.ttl = {
-        workflows: 0,
-        rules: 0,
-        documents: 0,
-        memories: 0,
-      };
+  describe('cache behavior', () => {
+    it('should use LRU cache with no expiration', async () => {
+      // With LRU cache, items never expire by time
+      await server['cacheManager'].setDocument('workflow', 'test', 'content');
 
-      const tempServer = new ProxyServer(db, shortTTLConfig);
-
-      await tempServer['cacheManager'].setDocument('workflow', 'test', 'content');
+      // Wait some time
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      // Verify entry exists before cleanup
-      const beforeCleanup = await tempServer['cacheManager'].getDocument('workflow', 'test');
-      expect(beforeCleanup).not.toBeNull();
-
-      await tempServer.start();
-
-      // Entry should be removed after cleanup
-      const afterCleanup = await tempServer['cacheManager'].getDocument('workflow', 'test');
-      expect(afterCleanup).toBeNull();
-
-      await tempServer.stop();
+      // Entry should still be present (no TTL expiration)
+      const cached = await server['cacheManager'].getDocument('workflow', 'test');
+      expect(cached).not.toBeNull();
+      expect(cached?.data.content).toBe('content');
     });
   });
 
   describe('graceful degradation', () => {
-    it('should serve stale cache when disconnected', async () => {
-      // Create server with short TTL to make cache expire
-      const shortTTLConfig = { ...config };
-      shortTTLConfig.cache.ttl = {
-        workflows: 0,
-        rules: 0,
-        documents: 0,
-        memories: 0,
-      };
-      const tempServer = new ProxyServer(db, shortTTLConfig);
-
-      // Add item to cache
-      await tempServer['cacheManager'].setDocument('workflow', 'test', 'cached content');
-
-      // Wait for cache to expire
-      await new Promise(resolve => setTimeout(resolve, 100));
+    it('should serve cached data when disconnected', async () => {
+      // LRU cache always serves cached data (no staleness - always fresh)
+      await server['cacheManager'].setDocument('workflow', 'test', 'cached content');
 
       // Simulate disconnected state
-      tempServer['connectionManager']['state'] = 'disconnected';
+      server['connectionManager']['state'] = 'disconnected';
 
-      const result = await tempServer['handleGetDocument']('workflow', 'test');
+      const result = await server['handleGetDocument']('workflow', 'test');
 
       expect((result.data as any).content).toBe('cached content');
-      expect(result._metadata.source).toBe('stale_cache');
-
-      await tempServer.stop();
+      expect(result._metadata.source).toBe('cache'); // Fresh cache, not stale
     });
 
     it('should return error when no cache available and disconnected', async () => {

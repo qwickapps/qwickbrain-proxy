@@ -232,8 +232,11 @@ export class QwickBrainClient {
       if (this.mode === 'mcp' || this.mode === 'sse') {
         // For MCP/SSE mode, check if client is connected
         if (!this.client) {
-          // Don't create new connection in health check - just return false
-          return false;
+          // Initialize connection on first health check
+          await this.connect();
+          if (!this.client) {
+            return false;
+          }
         }
         // Try listing tools as health check
         await this.client.listTools();
@@ -307,6 +310,143 @@ export class QwickBrainClient {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
       return response.json();
+    }
+  }
+
+  async createDocument(
+    docType: string,
+    name: string,
+    content: string,
+    project?: string,
+    metadata?: Record<string, unknown>
+  ): Promise<void> {
+    if (this.mode === 'mcp' || this.mode === 'sse') {
+      if (!this.client) {
+        throw new Error('MCP client not connected');
+      }
+      await this.client.callTool({
+        name: 'create_document',
+        arguments: {
+          doc_type: docType,
+          name,
+          content,
+          project,
+          metadata,
+        },
+      });
+    } else {
+      if (!this.config.url) {
+        throw new Error('HTTP mode requires url to be configured');
+      }
+      const response = await fetch(`${this.config.url}/mcp/document/create`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.config.apiKey && { 'Authorization': `Bearer ${this.config.apiKey}` }),
+        },
+        body: JSON.stringify({ doc_type: docType, name, content, project, metadata }),
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+    }
+  }
+
+  async setMemory(
+    name: string,
+    content: string,
+    project?: string,
+    metadata?: Record<string, unknown>
+  ): Promise<void> {
+    if (this.mode === 'mcp' || this.mode === 'sse') {
+      if (!this.client) {
+        throw new Error('MCP client not connected');
+      }
+      await this.client.callTool({
+        name: 'set_memory',
+        arguments: {
+          name,
+          content,
+          project,
+          metadata,
+        },
+      });
+    } else {
+      if (!this.config.url) {
+        throw new Error('HTTP mode requires url to be configured');
+      }
+      const response = await fetch(`${this.config.url}/mcp/memory/set`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.config.apiKey && { 'Authorization': `Bearer ${this.config.apiKey}` }),
+        },
+        body: JSON.stringify({ name, content, project, metadata }),
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+    }
+  }
+
+  async deleteDocument(docType: string, name: string, project?: string): Promise<void> {
+    if (this.mode === 'mcp' || this.mode === 'sse') {
+      if (!this.client) {
+        throw new Error('MCP client not connected');
+      }
+      await this.client.callTool({
+        name: 'delete_document',
+        arguments: {
+          doc_type: docType,
+          name,
+          project,
+        },
+      });
+    } else {
+      if (!this.config.url) {
+        throw new Error('HTTP mode requires url to be configured');
+      }
+      const response = await fetch(`${this.config.url}/mcp/document/delete`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.config.apiKey && { 'Authorization': `Bearer ${this.config.apiKey}` }),
+        },
+        body: JSON.stringify({ doc_type: docType, name, project }),
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+    }
+  }
+
+  async deleteMemory(name: string, project?: string): Promise<void> {
+    if (this.mode === 'mcp' || this.mode === 'sse') {
+      if (!this.client) {
+        throw new Error('MCP client not connected');
+      }
+      await this.client.callTool({
+        name: 'delete_memory',
+        arguments: {
+          name,
+          project,
+        },
+      });
+    } else {
+      if (!this.config.url) {
+        throw new Error('HTTP mode requires url to be configured');
+      }
+      const response = await fetch(`${this.config.url}/mcp/memory/delete`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.config.apiKey && { 'Authorization': `Bearer ${this.config.apiKey}` }),
+        },
+        body: JSON.stringify({ name, project }),
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
     }
   }
 

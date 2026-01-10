@@ -3,6 +3,10 @@ import { integer, sqliteTable, text, unique } from 'drizzle-orm/sqlite-core';
 
 /**
  * Cached documents (workflows, rules, FRDs, designs, etc.)
+ *
+ * Two-tier storage:
+ * - Critical tier (isCritical=true): workflows, rules, agents, templates - never evicted, not counted toward limit
+ * - Dynamic tier (isCritical=false): other documents - LRU eviction when storage limit reached
  */
 export const documents = sqliteTable('documents', {
   id: integer('id').primaryKey({ autoIncrement: true }),
@@ -14,7 +18,13 @@ export const documents = sqliteTable('documents', {
   cachedAt: integer('cached_at', { mode: 'timestamp' })
     .notNull()
     .default(sql`(unixepoch())`),
-  expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
+  lastAccessedAt: integer('last_accessed_at', { mode: 'timestamp' })
+    .notNull()
+    .default(sql`(unixepoch())`),
+  isCritical: integer('is_critical', { mode: 'boolean' })
+    .notNull()
+    .default(false),
+  sizeBytes: integer('size_bytes').notNull().default(0),
   synced: integer('synced', { mode: 'boolean' }).notNull().default(true),
 }, (table) => ({
   uniqueDocument: unique().on(table.docType, table.name, table.project),
@@ -22,6 +32,8 @@ export const documents = sqliteTable('documents', {
 
 /**
  * Cached memories (project context, patterns, decisions)
+ *
+ * Memories are always dynamic tier - LRU eviction applies
  */
 export const memories = sqliteTable('memories', {
   id: integer('id').primaryKey({ autoIncrement: true }),
@@ -32,7 +44,10 @@ export const memories = sqliteTable('memories', {
   cachedAt: integer('cached_at', { mode: 'timestamp' })
     .notNull()
     .default(sql`(unixepoch())`),
-  expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
+  lastAccessedAt: integer('last_accessed_at', { mode: 'timestamp' })
+    .notNull()
+    .default(sql`(unixepoch())`),
+  sizeBytes: integer('size_bytes').notNull().default(0),
   synced: integer('synced', { mode: 'boolean' }).notNull().default(true),
 }, (table) => ({
   uniqueMemory: unique().on(table.name, table.project),

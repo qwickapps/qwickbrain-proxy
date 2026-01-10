@@ -34,7 +34,20 @@ jobs:
       - name: Install dependencies
         run: npm install --legacy-peer-deps
 
+      - name: Check if build needed
+        id: check-build
+        run: |
+          # Check if pre-built dist artifacts exist
+          if [ -d "dist" ] || [ -d "dist-ui" ] || [ -d "dist-ui-lib" ]; then
+            echo "needs_build=false" >> $GITHUB_OUTPUT
+            echo "✓ Pre-built artifacts found, skipping build"
+          else
+            echo "needs_build=true" >> $GITHUB_OUTPUT
+            echo "→ No dist artifacts found, will build from source"
+          fi
+
       - name: Build
+        if: steps.check-build.outputs.needs_build == 'true'
         run: npm run build
 
       - name: Run validation
