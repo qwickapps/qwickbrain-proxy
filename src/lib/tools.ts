@@ -97,13 +97,13 @@ export const QWICKBRAIN_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'search_codebase',
-    description: 'Semantic search across the indexed codebase. Uses natural language to find relevant functions, classes, and methods. Requires the codebase to be indexed first. Returns ranked results with similarity scores.',
+    description: 'Search for specific code entities (functions, classes, methods) in the indexed codebase. Returns a list of matching code entities with their locations, signatures, and relevance scores. Use this when you need to FIND specific code elements or get a list of relevant code locations. Uses hybrid search (BM25 keyword matching + semantic embeddings) for accurate results. Output: Structured list of code entities with file paths, line numbers, signatures, and scores.',
     inputSchema: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
-          description: 'Natural language search query. Examples: "function to parse JSON", "class that handles authentication", "async method for file upload"',
+          description: 'Search query describing what code to find. Examples: "function to parse JSON", "class that handles authentication", "async method for file upload", "error handling utilities"',
         },
         limit: {
           type: 'integer',
@@ -112,8 +112,33 @@ export const QWICKBRAIN_TOOLS: ToolDefinition[] = [
         },
         min_score: {
           type: 'number',
-          description: 'Minimum similarity score threshold (default: 0.5)',
-          default: 0.5,
+          description: 'Minimum relevance score threshold (default: 0.3)',
+          default: 0.3,
+        },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'ask_qwickai',
+    description: 'Ask a question and get an AI-generated natural language answer about the codebase. The AI searches the codebase, analyzes relevant code, and explains it in plain English. Use this when you need to UNDERSTAND how something works or get an explanation. Powered by Llama LLM for intelligent analysis and natural language responses. Output: Natural language explanation with references to specific code locations.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Question about the codebase in natural language. Examples: "How does the authentication system work?", "What happens when a user logs in?", "Explain how database connections are managed", "What files are involved in processing payments?"',
+        },
+        max_results: {
+          type: 'integer',
+          description: 'Maximum code entities to analyze (default: 5, max: 10)',
+          default: 5,
+        },
+        model: {
+          type: 'string',
+          description: 'LLM model to use (default: llama-3.1-8b, options: llama-3.1-8b, qwen-2.5-14b)',
+          default: 'llama-3.1-8b',
+          enum: ['llama-3.1-8b', 'qwen-2.5-14b'],
         },
       },
       required: ['query'],
